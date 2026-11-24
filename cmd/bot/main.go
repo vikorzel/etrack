@@ -16,6 +16,8 @@ import (
 	"meal-bot/internal/storage"
 )
 
+var version = "dev"
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -45,6 +47,6 @@ func main() {
 		log.Fatalf("create telegram bot: %v", err)
 	}
 
-	log.Printf("meal-bot started (source=%s, db=%s, timezone=%s)", cfg.Source, cfg.DBPath, cfg.Location.String())
+	log.Printf("meal-bot started (version=%s, source=%s, db=%s, timezone=%s)", version, cfg.Source, cfg.DBPath, cfg.Location.String())
 	b.Start(ctx)
 }

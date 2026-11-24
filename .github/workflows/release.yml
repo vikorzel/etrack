@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run vet and tests
+        run: |
+          go vet ./...
+          go test -v ./...
+
+      - name: Build and package Linux binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          rm -rf dist
+          mkdir -p dist
+
+          for arch in amd64 arm64; do
+            stage_dir="$(mktemp -d)"
+            CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" go build \
+              -trimpath \
+              -ldflags="-s -w -X main.version=${VERSION}" \
+              -o "${stage_dir}/etrack" \
+              ./cmd/bot
+
+            cp README.md .env.example LICENSE "${stage_dir}/"
+            tar -C "${stage_dir}" -czf "dist/etrack_${VERSION}_linux_${arch}.tar.gz" .
+            rm -rf "${stage_dir}"
+          done
+
+          (cd dist && sha256sum *.tar.gz > checksums.txt)
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+
+          if gh release view "${VERSION}" >/dev/null 2>&1; then
+            gh release upload "${VERSION}" dist/*.tar.gz dist/checksums.txt --clobber
+          elif [[ "${VERSION}" == *-* ]]; then
+            gh release create "${VERSION}" dist/*.tar.gz dist/checksums.txt \
+              --title "${VERSION}" \
+              --generate-notes \
+              --prerelease
+          else
+            gh release create "${VERSION}" dist/*.tar.gz dist/checksums.txt \
+              --title "${VERSION}" \
+              --generate-notes
+          fi

@@ -96,6 +96,20 @@ go build -o meal-bot ./cmd/bot
 go test -v ./...
 ```
 
+## Релизы (GitHub Actions)
+
+При пуше любого тега вида `v*` запускается workflow [`.github/workflows/release.yml`](.github/workflows/release.yml), который:
+1. Прогоняет `go vet ./...` и `go test -v ./...`.
+2. Собирает статические бинарники `etrack` для `linux/amd64` и `linux/arm64` (`CGO_ENABLED=0`) с подстановкой версии тега в `main.version`.
+3. Упаковывает `.tar.gz`-архивы (`etrack`, `README.md`, `.env.example`, `LICENSE`) и файл `checksums.txt`, после чего публикует их в GitHub Releases.
+
+Пример запуска релиза:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## Формат CSV
 
 Экспортируемый файл содержит колонки:
