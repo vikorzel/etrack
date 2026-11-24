@@ -1,0 +1,23 @@
+# Put this file into the etrack repo as .woodpecker/deploy.yaml (default branch).
+#
+# Woodpecker UI -> etrack repo -> Settings -> Crons -> Add:
+#   Name: etrack-deploy   Branch: main   Schedule: @every 2m
+#
+# Every run checks GitHub Releases; a new vX.Y.Z release is deployed
+# 10 minutes after it was published (the release is created by
+# .github/workflows/release.yml when a v* tag is pushed).
+# "Run pipeline" (manual) deploys the latest release right away.
+
+when:
+  - event: cron
+    cron: etrack-deploy
+  - event: manual
+
+skip_clone: true
+
+steps:
+  - name: deploy
+    image: bash # local backend: the shell that runs the commands
+    commands:
+      - if [ "$CI_PIPELINE_EVENT" = "manual" ]; then export ETRACK_DEPLOY_DELAY=0; fi
+      - /usr/local/bin/etrack-deploy
