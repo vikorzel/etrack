@@ -16,7 +16,28 @@ import (
 var (
 	singleDatePattern = regexp.MustCompile(`^(\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2})$`)
 	rangeDatePattern  = regexp.MustCompile(`^(\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2})(?:\s*(?:-|–|—|\.\.)\s*|\s+)(\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2})$`)
+
+	ErrEmptyRange         = errors.New("empty date range")
+	ErrInvalidRangeFormat = errors.New("invalid date or range format")
+	ErrInvalidStartDate   = errors.New("invalid start date")
+	ErrInvalidEndDate     = errors.New("invalid end date")
+	ErrEndBeforeStart     = errors.New("end date is before start date")
 )
+
+// InvalidDateError reports an unparseable start or end date token.
+type InvalidDateError struct {
+	Sentinel error
+	Token    string
+	Err      error
+}
+
+func (e *InvalidDateError) Error() string {
+	return fmt.Sprintf("%s %q: %v", e.Sentinel.Error(), e.Token, e.Err)
+}
+
+func (e *InvalidDateError) Unwrap() []error {
+	return []error{e.Sentinel, e.Err}
+}
 
 // BuildMealsCSV formats meal records as UTF-8 CSV using loc for date/time display.
 func BuildMealsCSV(meals []storage.Meal, loc *time.Location) ([]byte, error) {
@@ -64,7 +85,7 @@ func ParseDateRange(input string, loc *time.Location) (from time.Time, to time.T
 
 	trimmed := strings.TrimSpace(input)
 	if trimmed == "" {
-		return time.Time{}, time.Time{}, "", "", errors.New("пустой период")
+		return time.Time{}, time.Time{}, "", "", ErrEmptyRange
 	}
 
 	var startToken, endToken string
@@ -75,20 +96,28 @@ func ParseDateRange(input string, loc *time.Location) (from time.Time, to time.T
 		startToken = m[1]
 		endToken = m[2]
 	} else {
-		return time.Time{}, time.Time{}, "", "", errors.New("неверный формат даты или диапазона")
+		return time.Time{}, time.Time{}, "", "", ErrInvalidRangeFormat
 	}
 
 	start, err := parseDateToken(startToken, loc)
 	if err != nil {
-		return time.Time{}, time.Time{}, "", "", fmt.Errorf("некорректная дата начала %q: %w", startToken, err)
+		return time.Time{}, time.Time{}, "", "", &InvalidDateError{
+			Sentinel: ErrInvalidStartDate,
+			Token:    startToken,
+			Err:      err,
+		}
 	}
 	end, err := parseDateToken(endToken, loc)
 	if err != nil {
-		return time.Time{}, time.Time{}, "", "", fmt.Errorf("некорректная дата окончания %q: %w", endToken, err)
+		return time.Time{}, time.Time{}, "", "", &InvalidDateError{
+			Sentinel: ErrInvalidEndDate,
+			Token:    endToken,
+			Err:      err,
+		}
 	}
 
 	if end.Before(start) {
-		return time.Time{}, time.Time{}, "", "", errors.New("конечная дата меньше начальной")
+		return time.Time{}, time.Time{}, "", "", ErrEndBeforeStart
 	}
 
 	from = start

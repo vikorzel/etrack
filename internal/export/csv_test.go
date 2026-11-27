@@ -2,6 +2,7 @@ package export
 
 import (
 	"encoding/csv"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -146,17 +147,30 @@ func TestParseDateRangeValid(t *testing.T) {
 
 func TestParseDateRangeInvalid(t *testing.T) {
 	loc := time.UTC
-	invalid := []string{
-		"",
-		"   ",
-		"24.11.2026 - 01.11.2026", // inverted
-		"31.02.2026",              // impossible calendar date
-		"24.11.2026 extra",        // trailing garbage
-		"yesterday",
+	cases := []struct {
+		input     string
+		wantErr   error
+		wantToken string
+	}{
+		{input: "", wantErr: ErrEmptyRange},
+		{input: "   ", wantErr: ErrEmptyRange},
+		{input: "24.11.2026 - 01.11.2026", wantErr: ErrEndBeforeStart},
+		{input: "31.02.2026", wantErr: ErrInvalidStartDate, wantToken: "31.02.2026"},
+		{input: "01.11.2026 - 31.02.2026", wantErr: ErrInvalidEndDate, wantToken: "31.02.2026"},
+		{input: "24.11.2026 extra", wantErr: ErrInvalidRangeFormat},
+		{input: "yesterday", wantErr: ErrInvalidRangeFormat},
 	}
-	for _, in := range invalid {
-		if _, _, _, _, err := ParseDateRange(in, loc); err == nil {
-			t.Errorf("ParseDateRange(%q): expected error, got nil", in)
+	for _, tc := range cases {
+		_, _, _, _, err := ParseDateRange(tc.input, loc)
+		if !errors.Is(err, tc.wantErr) {
+			t.Errorf("ParseDateRange(%q): err = %v, want errors.Is(..., %v)", tc.input, err, tc.wantErr)
+			continue
+		}
+		if tc.wantToken != "" {
+			var dateErr *InvalidDateError
+			if !errors.As(err, &dateErr) || dateErr.Token != tc.wantToken {
+				t.Errorf("ParseDateRange(%q): dateErr = %+v, want token %q", tc.input, dateErr, tc.wantToken)
+			}
 		}
 	}
 }
