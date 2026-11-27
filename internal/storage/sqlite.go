@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,14 @@ type Meal struct {
 	RecordedAt    time.Time
 	SatietyBefore int
 	SatietyAfter  int
+}
+
+// Weight represents one logged body-weight measurement in kilograms.
+type Weight struct {
+	ID         int64
+	UserID     int64
+	RecordedAt time.Time
+	WeightKg   float64
 }
 
 // SQLiteStore persists meals in a local SQLite database.
@@ -71,7 +80,14 @@ CREATE TABLE IF NOT EXISTS meals (
 	satiety_before INTEGER NOT NULL CHECK(satiety_before BETWEEN 1 AND 10),
 	satiety_after INTEGER NOT NULL CHECK(satiety_after BETWEEN 1 AND 10)
 );
-CREATE INDEX IF NOT EXISTS idx_meals_user_time ON meals(user_id, recorded_at);`
+CREATE INDEX IF NOT EXISTS idx_meals_user_time ON meals(user_id, recorded_at);
+CREATE TABLE IF NOT EXISTS weights (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	user_id INTEGER NOT NULL,
+	recorded_at INTEGER NOT NULL,
+	weight_kg REAL NOT NULL CHECK(weight_kg > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_weights_user_time ON weights(user_id, recorded_at);`
 
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
@@ -163,4 +179,89 @@ func (s *SQLiteStore) ListMeals(ctx context.Context, userID int64, from, to *tim
 		return nil, fmt.Errorf("iterate meal rows: %w", err)
 	}
 	return meals, nil
+}
+
+// CountMeals returns the total number of persisted meal records for userID.
+func (s *SQLiteStore) CountMeals(ctx context.Context, userID int64) (int, error) {
+	if userID == 0 {
+		return 0, errors.New("user_id must be non-zero")
+	}
+
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM meals WHERE user_id = ?`, userID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count meals: %w", err)
+	}
+	return count, nil
+}
+
+// SaveWeight validates and inserts a body-weight record, returning its generated row ID.
+func (s *SQLiteStore) SaveWeight(ctx context.Context, weight Weight) (int64, error) {
+	if weight.UserID == 0 {
+		return 0, errors.New("user_id must be non-zero")
+	}
+	if math.IsNaN(weight.WeightKg) || math.IsInf(weight.WeightKg, 0) || weight.WeightKg <= 0 || weight.WeightKg > 500 {
+		return 0, fmt.Errorf("weight_kg %v out of range (0, 500]", weight.WeightKg)
+	}
+	if weight.RecordedAt.IsZero() {
+		weight.RecordedAt = time.Now().UTC()
+	}
+
+	res, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO weights (user_id, recorded_at, weight_kg) VALUES (?, ?, ?)`,
+		weight.UserID,
+		weight.RecordedAt.UTC().Unix(),
+		weight.WeightKg,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("insert weight: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("read last insert id: %w", err)
+	}
+	return id, nil
+}
+
+// ListWeights returns all weight records for userID within the half-open interval [from, to), ordered chronologically.
+// Passing nil for from or to leaves that bound open.
+func (s *SQLiteStore) ListWeights(ctx context.Context, userID int64, from, to *time.Time) ([]Weight, error) {
+	if userID == 0 {
+		return nil, errors.New("user_id must be non-zero")
+	}
+
+	var b strings.Builder
+	b.WriteString(`SELECT id, user_id, recorded_at, weight_kg FROM weights WHERE user_id = ?`)
+	args := []any{userID}
+
+	if from != nil {
+		b.WriteString(` AND recorded_at >= ?`)
+		args = append(args, from.UTC().Unix())
+	}
+	if to != nil {
+		b.WriteString(` AND recorded_at < ?`)
+		args = append(args, to.UTC().Unix())
+	}
+	b.WriteString(` ORDER BY recorded_at ASC, id ASC`)
+
+	rows, err := s.db.QueryContext(ctx, b.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("query weights: %w", err)
+	}
+	defer rows.Close()
+
+	var weights []Weight
+	for rows.Next() {
+		var w Weight
+		var ts int64
+		if err := rows.Scan(&w.ID, &w.UserID, &ts, &w.WeightKg); err != nil {
+			return nil, fmt.Errorf("scan weight row: %w", err)
+		}
+		w.RecordedAt = time.Unix(ts, 0).UTC()
+		weights = append(weights, w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate weight rows: %w", err)
+	}
+	return weights, nil
 }

@@ -35,6 +35,7 @@ func unsetConfigEnv(t *testing.T) {
 		"TELEGRAM_BOT_TOKEN",
 		"DB_PATH",
 		"BOT_TIMEZONE",
+		"WEIGH_IN_INTERVAL",
 	}
 	for _, k := range keys {
 		t.Setenv(k, "")
@@ -66,6 +67,9 @@ func TestLoadFromEnvFileAndDefaults(t *testing.T) {
 	if cfg.Location != time.Local {
 		t.Fatalf("Location = %v, want time.Local", cfg.Location)
 	}
+	if cfg.WeighInInterval != DefaultWeighInInterval {
+		t.Fatalf("WeighInInterval = %d, want %d", cfg.WeighInInterval, DefaultWeighInInterval)
+	}
 	if cfg.Source != "env" {
 		t.Fatalf("Source = %q, want %q", cfg.Source, "env")
 	}
@@ -76,9 +80,10 @@ func TestLoadEnvOverridesFile(t *testing.T) {
 	t.Setenv("TELEGRAM_BOT_TOKEN", "env-token")
 	t.Setenv("DB_PATH", "/tmp/custom.db")
 	t.Setenv("BOT_TIMEZONE", "UTC")
+	t.Setenv("WEIGH_IN_INTERVAL", "20")
 
 	envPath := filepath.Join(t.TempDir(), ".env")
-	content := "TELEGRAM_BOT_TOKEN='file-token'\nDB_PATH=file.db\nBOT_TIMEZONE=Invalid/Zone\n"
+	content := "TELEGRAM_BOT_TOKEN='file-token'\nDB_PATH=file.db\nBOT_TIMEZONE=Invalid/Zone\nWEIGH_IN_INTERVAL=bad\n"
 	if err := os.WriteFile(envPath, []byte(content), 0o600); err != nil {
 		t.Fatalf("write .env: %v", err)
 	}
@@ -95,6 +100,9 @@ func TestLoadEnvOverridesFile(t *testing.T) {
 	}
 	if cfg.Location.String() != "UTC" {
 		t.Fatalf("Location = %q, want UTC", cfg.Location.String())
+	}
+	if cfg.WeighInInterval != 20 {
+		t.Fatalf("WeighInInterval = %d, want 20", cfg.WeighInInterval)
 	}
 	if cfg.Source != "env" {
 		t.Fatalf("Source = %q, want %q", cfg.Source, "env")
@@ -121,6 +129,32 @@ func TestLoadInvalidTimezoneErrors(t *testing.T) {
 	}
 }
 
+func TestLoadWeighInIntervalLocalValidation(t *testing.T) {
+	for _, raw := range []string{"abc", "-1", "12.5"} {
+		t.Run("invalid_"+raw, func(t *testing.T) {
+			unsetConfigEnv(t)
+			t.Setenv("TELEGRAM_BOT_TOKEN", "ok")
+			t.Setenv("WEIGH_IN_INTERVAL", raw)
+			if _, err := Load(context.Background(), ""); err == nil {
+				t.Fatalf("expected error for WEIGH_IN_INTERVAL=%q", raw)
+			}
+		})
+	}
+
+	t.Run("zero_uses_default", func(t *testing.T) {
+		unsetConfigEnv(t)
+		t.Setenv("TELEGRAM_BOT_TOKEN", "ok")
+		t.Setenv("WEIGH_IN_INTERVAL", "0")
+		cfg, err := Load(context.Background(), "")
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.WeighInInterval != DefaultWeighInInterval {
+			t.Fatalf("WeighInInterval = %d, want %d", cfg.WeighInInterval, DefaultWeighInInterval)
+		}
+	})
+}
+
 func TestLoadFromPocketBaseSuccess(t *testing.T) {
 	unsetConfigEnv(t)
 	t.Setenv("PB_CONFIG_HOST", "https://pb.internal:8090")
@@ -138,7 +172,8 @@ func TestLoadFromPocketBaseSuccess(t *testing.T) {
 					"app": "meal-bot",
 					"telegram_bot_token": "pb-secret-token",
 					"db_path": "/data/meals.db",
-					"bot_timezone": "UTC"
+					"bot_timezone": "UTC",
+					"weigh_in_interval": 10
 				}]
 			}`), nil
 		}),
@@ -172,6 +207,9 @@ func TestLoadFromPocketBaseSuccess(t *testing.T) {
 	}
 	if cfg.Location.String() != "UTC" {
 		t.Fatalf("Location = %q, want UTC", cfg.Location.String())
+	}
+	if cfg.WeighInInterval != 10 {
+		t.Fatalf("WeighInInterval = %d, want 10", cfg.WeighInInterval)
 	}
 	if cfg.Source != "pocketbase" {
 		t.Fatalf("Source = %q, want %q", cfg.Source, "pocketbase")
@@ -215,6 +253,9 @@ func TestLoadFromPocketBaseCustomCollectionAppAndDefaults(t *testing.T) {
 	}
 	if cfg.Location != time.Local {
 		t.Fatalf("Location = %v, want time.Local", cfg.Location)
+	}
+	if cfg.WeighInInterval != DefaultWeighInInterval {
+		t.Fatalf("WeighInInterval = %d, want %d", cfg.WeighInInterval, DefaultWeighInInterval)
 	}
 	if cfg.Source != "pocketbase" {
 		t.Fatalf("Source = %q, want pocketbase", cfg.Source)
@@ -299,6 +340,13 @@ func TestLoadFromPocketBaseErrors(t *testing.T) {
 			host: "http://pb.internal:8090",
 			transport: func(*http.Request) (*http.Response, error) {
 				return jsonResponse(http.StatusOK, `{"items":[{"app":"meal-bot","telegram_bot_token":"tok","bot_timezone":"Mars/Phobos"}]}`), nil
+			},
+		},
+		{
+			name: "negative weigh_in_interval in record",
+			host: "http://pb.internal:8090",
+			transport: func(*http.Request) (*http.Response, error) {
+				return jsonResponse(http.StatusOK, `{"items":[{"app":"meal-bot","telegram_bot_token":"tok","weigh_in_interval":-5}]}`), nil
 			},
 		},
 	}

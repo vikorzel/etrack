@@ -3,6 +3,8 @@ package bot
 import (
 	"context"
 	"encoding/csv"
+	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"meal-bot/internal/config"
 	"meal-bot/internal/storage"
 )
 
@@ -70,6 +73,11 @@ func (m *mockSender) SendDocument(_ context.Context, params *tgbot.SendDocumentP
 
 func newTestHandler(t *testing.T, now time.Time) (*Handler, *storage.SQLiteStore, *mockSender) {
 	t.Helper()
+	return newTestHandlerWithInterval(t, now, config.DefaultWeighInInterval)
+}
+
+func newTestHandlerWithInterval(t *testing.T, now time.Time, interval int) (*Handler, *storage.SQLiteStore, *mockSender) {
+	t.Helper()
 	store, err := storage.NewSQLiteStore(filepath.Join(t.TempDir(), "bot_test.db"))
 	if err != nil {
 		t.Fatalf("NewSQLiteStore: %v", err)
@@ -77,7 +85,7 @@ func newTestHandler(t *testing.T, now time.Time) (*Handler, *storage.SQLiteStore
 	t.Cleanup(func() { _ = store.Close() })
 
 	loc := time.FixedZone("UTC+2", 2*3600)
-	h := NewHandler(store, loc)
+	h := NewHandler(store, loc, interval)
 	h.now = func() time.Time { return now }
 	return h, store, &mockSender{nextMsgID: 10}
 }
@@ -402,5 +410,255 @@ func TestCrossLocaleReplyKeyboardMatching(t *testing.T) {
 	h.HandleUpdate(ctx, sender, msgUpdateLang(96, 96, "ru", enMessages.btnExportCSV))
 	if len(sender.sentMessages) != 2 || sender.sentMessages[1].Text != ruMessages.exportChoosePeriod {
 		t.Fatalf("expected Russian exportChoosePeriod, got %+v", sender.sentMessages)
+	}
+}
+
+type countErrStore struct {
+	MealStore
+}
+
+func (s countErrStore) CountMeals(context.Context, int64) (int, error) {
+	return 0, errors.New("count failed")
+}
+
+func TestWeighInLocalizationMessagesPopulated(t *testing.T) {
+	for _, loc := range []Locale{LocaleEN, LocaleRU} {
+		msgs := messagesFor(loc)
+		if msgs.btnWeighIn == "" || msgs.weightPrompt == "" || msgs.weightInvalid == "" ||
+			msgs.weightSaveError == "" || msgs.weightCancelledText == "" ||
+			msgs.weightSavedConfirmation("24.11.2026 12:30", "72.5") == "" {
+			t.Fatalf("locale %q has empty weigh-in message field", loc)
+		}
+	}
+}
+
+func TestPeriodicWeighInTriggerAndIsolation(t *testing.T) {
+	now := time.Date(2026, 11, 24, 10, 30, 0, 0, time.UTC)
+	h, _, sender := newTestHandlerWithInterval(t, now, 3)
+	ctx := context.Background()
+
+	saveMeal := func(userID int64, msgID int) tgbot.EditMessageTextParams {
+		h.HandleUpdate(ctx, sender, cbUpdate(fmt.Sprintf("cb-%d-%d", userID, msgID), userID, userID, msgID, "meal:after:3:7"))
+		return sender.editedMsgs[len(sender.editedMsgs)-1]
+	}
+
+	// Meals 1 and 2 for user 10: no weigh-in button.
+	if edit := saveMeal(10, 101); edit.ReplyMarkup != nil {
+		t.Fatalf("meal 1 should not attach ReplyMarkup, got %#v", edit.ReplyMarkup)
+	}
+	if edit := saveMeal(10, 102); edit.ReplyMarkup != nil {
+		t.Fatalf("meal 2 should not attach ReplyMarkup, got %#v", edit.ReplyMarkup)
+	}
+
+	// Different user saving a meal does not trigger weigh-in for user 10 or user 20.
+	if edit := saveMeal(20, 201); edit.ReplyMarkup != nil {
+		t.Fatalf("user 20 meal 1 should not attach ReplyMarkup, got %#v", edit.ReplyMarkup)
+	}
+
+	// Meal 3 for user 10: triggers weigh-in button.
+	edit3 := saveMeal(10, 103)
+	kb, ok := edit3.ReplyMarkup.(*models.InlineKeyboardMarkup)
+	if !ok || len(kb.InlineKeyboard) != 1 || len(kb.InlineKeyboard[0]) != 1 {
+		t.Fatalf("meal 3 expected single inline weigh-in button, got %#v", edit3.ReplyMarkup)
+	}
+	btn := kb.InlineKeyboard[0][0]
+	if btn.Text != enMessages.btnWeighIn || btn.CallbackData != "weight:start" {
+		t.Fatalf("unexpected weigh-in button: %+v", btn)
+	}
+
+	// Meals 4 and 5: no button; meal 6: triggers again.
+	if edit := saveMeal(10, 104); edit.ReplyMarkup != nil {
+		t.Fatalf("meal 4 should not attach ReplyMarkup, got %#v", edit.ReplyMarkup)
+	}
+	if edit := saveMeal(10, 105); edit.ReplyMarkup != nil {
+		t.Fatalf("meal 5 should not attach ReplyMarkup, got %#v", edit.ReplyMarkup)
+	}
+	edit6 := saveMeal(10, 106)
+	if _, ok := edit6.ReplyMarkup.(*models.InlineKeyboardMarkup); !ok {
+		t.Fatalf("meal 6 expected weigh-in inline button, got %#v", edit6.ReplyMarkup)
+	}
+}
+
+func TestPeriodicWeighInCountMealsErrorFallback(t *testing.T) {
+	now := time.Date(2026, 11, 24, 10, 30, 0, 0, time.UTC)
+	_, baseStore, sender := newTestHandlerWithInterval(t, now, 1)
+	loc := time.FixedZone("UTC+2", 2*3600)
+	h := NewHandler(countErrStore{MealStore: baseStore}, loc, 1)
+	h.now = func() time.Time { return now }
+
+	ctx := context.Background()
+	h.HandleUpdate(ctx, sender, cbUpdate("cb-err", 33, 33, 301, "meal:after:4:8"))
+
+	if len(sender.editedMsgs) != 1 {
+		t.Fatalf("expected 1 confirmation edit, got %d", len(sender.editedMsgs))
+	}
+	edit := sender.editedMsgs[0]
+	if !strings.Contains(edit.Text, "Meal recorded") {
+		t.Fatalf("expected meal confirmation text, got %q", edit.Text)
+	}
+	if edit.ReplyMarkup != nil {
+		t.Fatalf("expected nil ReplyMarkup when CountMeals fails, got %#v", edit.ReplyMarkup)
+	}
+}
+
+func TestWeighInFlowValidationAndPersistence(t *testing.T) {
+	now := time.Date(2026, 11, 24, 10, 30, 0, 0, time.UTC) // 12:30 UTC+2
+	h, store, sender := newTestHandlerWithInterval(t, now, 1)
+	ctx := context.Background()
+
+	// Tap weigh-in button -> enters awaitingWeight and shows prompt with cancel button.
+	h.HandleUpdate(ctx, sender, cbUpdate("w1", 40, 40, 401, "weight:start"))
+	if !h.isAwaitingWeight(40) {
+		t.Fatal("expected user 40 to be awaitingWeight after weight:start")
+	}
+	promptEdit := sender.editedMsgs[len(sender.editedMsgs)-1]
+	if promptEdit.Text != enMessages.weightPrompt {
+		t.Fatalf("prompt text = %q, want %q", promptEdit.Text, enMessages.weightPrompt)
+	}
+	cancelKB, ok := promptEdit.ReplyMarkup.(*models.InlineKeyboardMarkup)
+	if !ok || len(cancelKB.InlineKeyboard) != 1 || cancelKB.InlineKeyboard[0][0].CallbackData != "weight:cancel" {
+		t.Fatalf("unexpected weight prompt keyboard: %#v", promptEdit.ReplyMarkup)
+	}
+
+	// Invalid inputs keep awaitingWeight and save nothing.
+	for _, bad := range []string{"abc", "0", "-10", "501", "72.5.1", "kg"} {
+		h.HandleUpdate(ctx, sender, msgUpdate(40, 40, bad))
+		if !h.isAwaitingWeight(40) {
+			t.Fatalf("expected awaitingWeight to remain true for invalid input %q", bad)
+		}
+		lastMsg := sender.sentMessages[len(sender.sentMessages)-1]
+		if lastMsg.Text != enMessages.weightInvalid {
+			t.Fatalf("invalid input %q message = %q, want %q", bad, lastMsg.Text, enMessages.weightInvalid)
+		}
+	}
+
+	// Valid inputs with dot, comma, and kg/кг suffixes.
+	validCases := []struct {
+		input string
+		want  float64
+		text  string
+	}{
+		{"72.5", 72.5, "72.5 kg"},
+		{"71,25", 71.25, "71.25 kg"},
+		{"70.5 kg", 70.5, "70.5 kg"},
+		{"69,8 кг", 69.8, "69.8 kg"},
+	}
+	for i, tc := range validCases {
+		if i > 0 {
+			h.HandleUpdate(ctx, sender, cbUpdate(fmt.Sprintf("w-start-%d", i), 40, 40, 401+i, "weight:start"))
+		}
+		h.HandleUpdate(ctx, sender, msgUpdate(40, 40, tc.input))
+		if h.isAwaitingWeight(40) {
+			t.Fatalf("expected awaitingWeight to clear after valid input %q", tc.input)
+		}
+		lastMsg := sender.sentMessages[len(sender.sentMessages)-1]
+		if !strings.Contains(lastMsg.Text, "24.11.2026 12:30") || !strings.Contains(lastMsg.Text, tc.text) {
+			t.Fatalf("unexpected confirmation for %q: %q", tc.input, lastMsg.Text)
+		}
+	}
+
+	weights, err := store.ListWeights(ctx, 40, nil, nil)
+	if err != nil {
+		t.Fatalf("ListWeights: %v", err)
+	}
+	if len(weights) != len(validCases) {
+		t.Fatalf("len(weights) = %d, want %d", len(weights), len(validCases))
+	}
+	for i, tc := range validCases {
+		if weights[i].WeightKg != tc.want {
+			t.Errorf("weights[%d].WeightKg = %v, want %v", i, weights[i].WeightKg, tc.want)
+		}
+	}
+}
+
+func TestWeighInCancellationAndStateMutualExclusion(t *testing.T) {
+	now := time.Date(2026, 11, 24, 10, 30, 0, 0, time.UTC)
+	h, store, sender := newTestHandlerWithInterval(t, now, 1)
+	ctx := context.Background()
+
+	// Inline cancel button clears awaitingWeight.
+	h.HandleUpdate(ctx, sender, cbUpdate("c1", 50, 50, 501, "weight:start"))
+	h.HandleUpdate(ctx, sender, cbUpdate("c2", 50, 50, 501, "weight:cancel"))
+	if h.isAwaitingWeight(50) {
+		t.Fatal("expected weight:cancel to clear awaitingWeight")
+	}
+	if sender.editedMsgs[len(sender.editedMsgs)-1].Text != enMessages.weightCancelledText {
+		t.Fatalf("unexpected cancel text: %q", sender.editedMsgs[len(sender.editedMsgs)-1].Text)
+	}
+
+	// /cancel clears awaitingWeight.
+	h.HandleUpdate(ctx, sender, cbUpdate("c3", 50, 50, 502, "weight:start"))
+	h.HandleUpdate(ctx, sender, msgUpdate(50, 50, "/cancel"))
+	if h.isAwaitingWeight(50) {
+		t.Fatal("expected /cancel to clear awaitingWeight")
+	}
+
+	// Main menu button clears awaitingWeight.
+	h.HandleUpdate(ctx, sender, cbUpdate("c4", 50, 50, 503, "weight:start"))
+	h.HandleUpdate(ctx, sender, msgUpdate(50, 50, enMessages.btnRecordMeal))
+	if h.isAwaitingWeight(50) {
+		t.Fatal("expected Record meal button to clear awaitingWeight")
+	}
+
+	// Mutual exclusion with awaitingRange.
+	h.HandleUpdate(ctx, sender, cbUpdate("c5", 50, 50, 504, "export:custom"))
+	if !h.isAwaitingRange(50) {
+		t.Fatal("expected awaitingRange to be true")
+	}
+	h.HandleUpdate(ctx, sender, cbUpdate("c6", 50, 50, 505, "weight:start"))
+	if h.isAwaitingRange(50) || !h.isAwaitingWeight(50) {
+		t.Fatalf("expected awaitingWeight=true and awaitingRange=false, got weight=%v range=%v", h.isAwaitingWeight(50), h.isAwaitingRange(50))
+	}
+	h.HandleUpdate(ctx, sender, cbUpdate("c7", 50, 50, 506, "export:custom"))
+	if !h.isAwaitingRange(50) || h.isAwaitingWeight(50) {
+		t.Fatalf("expected awaitingRange=true and awaitingWeight=false, got range=%v weight=%v", h.isAwaitingRange(50), h.isAwaitingWeight(50))
+	}
+
+	weights, err := store.ListWeights(ctx, 50, nil, nil)
+	if err != nil {
+		t.Fatalf("ListWeights: %v", err)
+	}
+	if len(weights) != 0 {
+		t.Fatalf("expected 0 saved weights after cancellations, got %d", len(weights))
+	}
+}
+
+func TestWeighInLocalizationRussian(t *testing.T) {
+	now := time.Date(2026, 11, 24, 10, 30, 0, 0, time.UTC)
+	h, _, sender := newTestHandlerWithInterval(t, now, 1)
+	ctx := context.Background()
+
+	// 1st meal triggers Russian weigh-in button.
+	h.HandleUpdate(ctx, sender, cbUpdateLang("ru1", 60, 60, "ru-RU", 601, "meal:after:3:8"))
+	edit := sender.editedMsgs[len(sender.editedMsgs)-1]
+	kb, ok := edit.ReplyMarkup.(*models.InlineKeyboardMarkup)
+	if !ok || kb.InlineKeyboard[0][0].Text != ruMessages.btnWeighIn {
+		t.Fatalf("expected Russian weigh-in button, got %#v", edit.ReplyMarkup)
+	}
+
+	// Start weigh-in in Russian.
+	h.HandleUpdate(ctx, sender, cbUpdateLang("ru2", 60, 60, "ru", 601, "weight:start"))
+	if sender.editedMsgs[len(sender.editedMsgs)-1].Text != ruMessages.weightPrompt {
+		t.Fatalf("expected Russian weightPrompt, got %q", sender.editedMsgs[len(sender.editedMsgs)-1].Text)
+	}
+
+	// Invalid weight in Russian.
+	h.HandleUpdate(ctx, sender, msgUpdateLang(60, 60, "ru", "abc"))
+	if sender.sentMessages[len(sender.sentMessages)-1].Text != ruMessages.weightInvalid {
+		t.Fatalf("expected Russian weightInvalid, got %q", sender.sentMessages[len(sender.sentMessages)-1].Text)
+	}
+
+	// Valid weight in Russian.
+	h.HandleUpdate(ctx, sender, msgUpdateLang(60, 60, "ru", "68,4"))
+	lastMsg := sender.sentMessages[len(sender.sentMessages)-1]
+	if !strings.Contains(lastMsg.Text, "Вес записан") || !strings.Contains(lastMsg.Text, "68.4 кг") {
+		t.Fatalf("expected Russian weight confirmation, got %q", lastMsg.Text)
+	}
+
+	// Cancel in Russian.
+	h.HandleUpdate(ctx, sender, cbUpdateLang("ru3", 60, 60, "ru", 602, "weight:start"))
+	h.HandleUpdate(ctx, sender, cbUpdateLang("ru4", 60, 60, "ru", 602, "weight:cancel"))
+	if sender.editedMsgs[len(sender.editedMsgs)-1].Text != ruMessages.weightCancelledText {
+		t.Fatalf("expected Russian weightCancelledText, got %q", sender.editedMsgs[len(sender.editedMsgs)-1].Text)
 	}
 }

@@ -10,11 +10,15 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const (
+	// DefaultWeighInInterval is the default number of meal records between weigh-in prompts.
+	DefaultWeighInInterval = 15
+
 	defaultDBPath       = "meals.db"
 	defaultPBCollection = "configs"
 	defaultPBApp        = "meal-bot"
@@ -22,10 +26,11 @@ const (
 
 // Config holds runtime settings for the Telegram meal-tracking bot.
 type Config struct {
-	Token    string
-	DBPath   string
-	Location *time.Location
-	Source   string
+	Token           string
+	DBPath          string
+	Location        *time.Location
+	WeighInInterval int
+	Source          string
 }
 
 type pbRecordsResponse struct {
@@ -37,6 +42,7 @@ type pbConfigRecord struct {
 	TelegramBotToken string `json:"telegram_bot_token"`
 	DBPath           string `json:"db_path"`
 	BotTimezone      string `json:"bot_timezone"`
+	WeighInInterval  int    `json:"weigh_in_interval"`
 }
 
 // Load reads configuration from PocketBase when PB_CONFIG_HOST is set,
@@ -78,10 +84,20 @@ func loadWithClient(ctx context.Context, envPath string, client *http.Client) (C
 		return loadFromPocketBase(ctx, client, pbHost, collection, appName)
 	}
 
+	weighInInterval := 0
+	if rawInterval := lookup("WEIGH_IN_INTERVAL"); rawInterval != "" {
+		parsed, err := strconv.Atoi(rawInterval)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid WEIGH_IN_INTERVAL %q: must be an integer", rawInterval)
+		}
+		weighInInterval = parsed
+	}
+
 	return buildConfig(
 		lookup("TELEGRAM_BOT_TOKEN"),
 		lookup("DB_PATH"),
 		lookup("BOT_TIMEZONE"),
+		weighInInterval,
 		"env",
 	)
 }
@@ -126,7 +142,7 @@ func loadFromPocketBase(ctx context.Context, client *http.Client, host, collecti
 	}
 
 	rec := payload.Items[0]
-	return buildConfig(rec.TelegramBotToken, rec.DBPath, rec.BotTimezone, "pocketbase")
+	return buildConfig(rec.TelegramBotToken, rec.DBPath, rec.BotTimezone, rec.WeighInInterval, "pocketbase")
 }
 
 func normalizePBEndpoint(host, collection, appName string) (string, error) {
@@ -162,7 +178,7 @@ func normalizePBEndpoint(host, collection, appName string) (string, error) {
 	return u.String(), nil
 }
 
-func buildConfig(token, dbPath, tz, source string) (Config, error) {
+func buildConfig(token, dbPath, tz string, weighInInterval int, source string) (Config, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		if source == "pocketbase" {
@@ -185,11 +201,22 @@ func buildConfig(token, dbPath, tz, source string) (Config, error) {
 		loc = loaded
 	}
 
+	if weighInInterval < 0 {
+		if source == "pocketbase" {
+			return Config{}, fmt.Errorf("invalid weigh_in_interval %d in PocketBase config record: must be >= 0", weighInInterval)
+		}
+		return Config{}, fmt.Errorf("invalid WEIGH_IN_INTERVAL %d: must be >= 0", weighInInterval)
+	}
+	if weighInInterval == 0 {
+		weighInInterval = DefaultWeighInInterval
+	}
+
 	return Config{
-		Token:    token,
-		DBPath:   dbPath,
-		Location: loc,
-		Source:   source,
+		Token:           token,
+		DBPath:          dbPath,
+		Location:        loc,
+		WeighInInterval: weighInInterval,
+		Source:          source,
 	}, nil
 }
 

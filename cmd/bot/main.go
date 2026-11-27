@@ -40,13 +40,13 @@ func main() {
 		}
 	}()
 
-	handler := mealbot.NewHandler(store, cfg.Location)
+	handler := mealbot.NewHandler(store, cfg.Location, cfg.WeighInInterval)
 
 	b, err := tgbot.New(cfg.Token, tgbot.WithDefaultHandler(handler.DefaultHandler()))
 	if err != nil {
 		log.Fatalf("create telegram bot: %v", err)
 	}
 
-	log.Printf("meal-bot started (version=%s, source=%s, db=%s, timezone=%s)", version, cfg.Source, cfg.DBPath, cfg.Location.String())
+	log.Printf("meal-bot started (version=%s, source=%s, db=%s, timezone=%s, weigh_in_interval=%d)", version, cfg.Source, cfg.DBPath, cfg.Location.String(), cfg.WeighInInterval)
 	b.Start(ctx)
 }

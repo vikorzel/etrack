@@ -38,6 +38,7 @@ type localeMessages struct {
 
 	btnCancel       string
 	btnBack         string
+	btnWeighIn      string
 	btnExport7d     string
 	btnExport30d    string
 	btnExportAll    string
@@ -52,6 +53,12 @@ type localeMessages struct {
 	stepAfterText         func(before int) string
 	mealSavedConfirmation func(localTime string, before, after int, delta string) string
 	mealCancelledText     string
+
+	weightPrompt            string
+	weightInvalid           string
+	weightSavedConfirmation func(localTime string, weight string) string
+	weightSaveError         string
+	weightCancelledText     string
 
 	cbInvalidValue  string
 	cbInvalidData   string
@@ -88,6 +95,7 @@ var enMessages = localeMessages{
 
 	btnCancel:       "❌ Cancel",
 	btnBack:         "⬅️ Back",
+	btnWeighIn:      "⚖️ Weigh in",
 	btnExport7d:     "Last 7 days",
 	btnExport30d:    "Last 30 days",
 	btnExportAll:    "All time",
@@ -113,6 +121,16 @@ var enMessages = localeMessages{
 		)
 	},
 	mealCancelledText: "Recording cancelled.",
+
+	weightPrompt: "Enter your current weight in kg (e.g., 72.5).\n\n" +
+		"Send /cancel to cancel.",
+	weightInvalid: "Could not parse weight. Enter a number in kg greater than 0 and up to 500 (e.g., 72.5 or 72,5).\n\n" +
+		"Send /cancel to cancel.",
+	weightSavedConfirmation: func(localTime string, weight string) string {
+		return fmt.Sprintf("✅ Weight recorded (%s): %s kg", localTime, weight)
+	},
+	weightSaveError:     "Failed to save weight to the database.",
+	weightCancelledText: "Weigh-in cancelled.",
 
 	cbInvalidValue:  "Invalid value",
 	cbInvalidData:   "Invalid data",
@@ -178,6 +196,7 @@ var ruMessages = localeMessages{
 
 	btnCancel:       "❌ Отмена",
 	btnBack:         "⬅️ Назад",
+	btnWeighIn:      "⚖️ Взвеситься",
 	btnExport7d:     "За 7 дней",
 	btnExport30d:    "За 30 дней",
 	btnExportAll:    "За всё время",
@@ -203,6 +222,16 @@ var ruMessages = localeMessages{
 		)
 	},
 	mealCancelledText: "Запись отменена.",
+
+	weightPrompt: "Введите ваш текущий вес в кг (например, 72.5).\n\n" +
+		"Для отмены введите /cancel.",
+	weightInvalid: "Не удалось распознать вес. Введите число в кг больше 0 и не больше 500 (например, 72.5 или 72,5).\n\n" +
+		"Для отмены введите /cancel.",
+	weightSavedConfirmation: func(localTime string, weight string) string {
+		return fmt.Sprintf("✅ Вес записан (%s): %s кг", localTime, weight)
+	},
+	weightSaveError:     "Не удалось сохранить вес в базу данных.",
+	weightCancelledText: "Взвешивание отменено.",
 
 	cbInvalidValue:  "Некорректное значение",
 	cbInvalidData:   "Некорректные данные",
